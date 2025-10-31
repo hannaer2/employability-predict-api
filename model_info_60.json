@@ -1,0 +1,40 @@
+{
+  "model_type": "Hybrid Ensemble",
+  "components": [
+    "LightGBM",
+    "CatBoost",
+    "TabNet",
+    "MLP"
+  ],
+  "weights": [
+    0.2535824881820533,
+    0.2544876721543529,
+    0.253269529955852,
+    0.2386603097077418
+  ],
+  "performance": {
+    "accuracy": 0.8280141843971631,
+    "precision": 0.8300170905507213,
+    "recall": 0.8280141843971631,
+    "f1_score": 0.8270452536899181,
+    "training_time": 40.35861420631409
+  },
+  "feature_columns": [
+    "Track_encoded",
+    "Technical_Correct",
+    "Soft_Correct",
+    "Behavioral_Correct",
+    "Career_Correct",
+    "Digital_Correct",
+    "Analytical_Correct",
+    "Creative_Correct",
+    "Overall_Percentage"
+  ],
+  "timestamp": "2025-10-28 02:30:03",
+  "cv_performance": {
+    "mean_accuracy": 0.8868250539956805,
+    "mean_f1": 0.8864052015878379,
+    "std_accuracy": 0.014235211277135265,
+    "std_f1": 0.013886332418072113
+  }
+}
