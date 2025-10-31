@@ -1,0 +1,6 @@
+[build]
+builder = "paketobuildpacks/builder:base"
+buildCommand = "bash install.sh"
+
+[start]
+command = "gunicorn app:app --bind 0.0.0.0:$PORT"
