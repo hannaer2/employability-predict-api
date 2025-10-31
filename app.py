@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import pandas as pd
+from hybrid_ensemble import HybridEnsemble
 import joblib
 import numpy as np
 from flask_cors import CORS
