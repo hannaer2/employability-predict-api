@@ -5,38 +5,64 @@ import numpy as np
 from flask_cors import CORS
 import warnings
 import os
+import json
+
 warnings.filterwarnings('ignore')
 
 # Import from separate module
-from hybrid_ensemble import HybridEnsemble
+try:
+    from hybrid_ensemble import HybridEnsemble
+except ImportError:
+    print("⚠️  Could not import HybridEnsemble, using fallback")
+    class HybridEnsemble:
+        def __init__(self, models, weights=None):
+            self.models = models
+            self.weights = weights
 
 app = Flask(__name__)
 CORS(app)
 
-# Load model artifacts
-try:
-    artifacts = joblib.load('best_employability_model_60.pkl')
-    model = artifacts['model']
-    scaler = artifacts['scaler']
-    label_encoder_track = artifacts['label_encoder_track']
-    label_encoder_label = artifacts['label_encoder_label']
-    feature_columns = artifacts['feature_columns']
+# Global variables for model artifacts
+model = None
+scaler = None
+label_encoder_track = None
+label_encoder_label = None
+feature_columns = None
+loaded_model_info = None
+
+def load_model_artifacts():
+    """Load model artifacts with proper error handling"""
+    global model, scaler, label_encoder_track, label_encoder_label, feature_columns, loaded_model_info
     
-    # Load model info for additional metadata
-    import json
-    with open('model_info_60.json', 'r') as f:
-        loaded_model_info = json.load(f)
-    
-    print("✅ Model loaded successfully!")
-    print(f"✅ Model type: {type(model)}")
-    print(f"✅ Feature columns: {feature_columns}")
-    print(f"✅ Model performance: F1-Score = {loaded_model_info['performance']['f1_score']:.4f}")
-    print(f"✅ Ensemble components: {loaded_model_info['components']}")
-    
-except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    model = None
-    loaded_model_info = None
+    try:
+        artifacts = joblib.load('best_employability_model_60.pkl')
+        model = artifacts['model']
+        scaler = artifacts['scaler']
+        label_encoder_track = artifacts['label_encoder_track']
+        label_encoder_label = artifacts['label_encoder_label']
+        feature_columns = artifacts['feature_columns']
+        
+        # Load model info for additional metadata
+        try:
+            with open('model_info_60.json', 'r') as f:
+                loaded_model_info = json.load(f)
+        except FileNotFoundError:
+            print("⚠️  Model info file not found, continuing without metadata")
+            loaded_model_info = {}
+        
+        print("✅ Model loaded successfully!")
+        print(f"✅ Model type: {type(model)}")
+        print(f"✅ Feature columns: {feature_columns}")
+        
+        if loaded_model_info and 'performance' in loaded_model_info:
+            print(f"✅ Model performance: F1-Score = {loaded_model_info['performance'].get('f1_score', 'N/A')}")
+        
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
+        print("⚠️  Running in fallback mode - some features may not work")
+
+# Load model on startup
+load_model_artifacts()
 
 def convert_to_native_types(obj):
     """Convert numpy types to native Python types"""
@@ -57,41 +83,82 @@ def convert_to_native_types(obj):
     else:
         return obj
 
+def validate_input_data(data):
+    """Validate input data and return errors if any"""
+    required_fields = [
+        'Track', 'Technical_Correct', 'Soft_Correct', 'Behavioral_Correct',
+        'Career_Correct', 'Digital_Correct', 'Analytical_Correct', 
+        'Creative_Correct', 'Overall_Percentage'
+    ]
+    
+    # Check missing fields
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        return f"Missing fields: {missing_fields}"
+    
+    # Validate track
+    if label_encoder_track and data['Track'] not in label_encoder_track.classes_:
+        available_tracks = label_encoder_track.classes_.tolist()
+        return f"Invalid track '{data['Track']}'. Available tracks: {available_tracks}"
+    
+    # Validate numerical fields
+    numerical_fields = [
+        'Technical_Correct', 'Soft_Correct', 'Behavioral_Correct',
+        'Career_Correct', 'Digital_Correct', 'Analytical_Correct', 
+        'Creative_Correct', 'Overall_Percentage'
+    ]
+    
+    validation_errors = []
+    for field in numerical_fields:
+        value = data[field]
+        if not isinstance(value, (int, float)):
+            validation_errors.append(f"{field} must be a number")
+        elif value < 0:
+            validation_errors.append(f"{field} cannot be negative")
+        elif field == 'Overall_Percentage' and value > 100:
+            validation_errors.append(f"{field} cannot exceed 100")
+        elif field.endswith('_Correct') and value > 100:
+            validation_errors.append(f"{field} cannot exceed 100")
+    
+    if validation_errors:
+        return "Validation errors: " + "; ".join(validation_errors)
+    
+    return None
+
 @app.route('/')
 def home():
     return jsonify({
         "message": "Employability Prediction API v2.0",
         "status": "active",
         "model_version": "60_dataset",
-        "performance": loaded_model_info['performance'] if loaded_model_info else None,
+        "model_loaded": model is not None,
+        "performance": loaded_model_info.get('performance', {}) if loaded_model_info else {},
         "endpoints": {
             "predict": "/predict (POST)",
             "health": "/health (GET)",
             "tracks": "/tracks (GET)",
             "model_info": "/model-info (GET)",
-            "performance": "/performance (GET)"
+            "performance": "/performance (GET)",
+            "batch_predict": "/predict-batch (POST)"
         }
     })
 
 @app.route('/health')
 def health():
-    if model:
-        return jsonify({
-            "status": "healthy", 
-            "model_loaded": True,
-            "model_version": "60_dataset"
-        })
-    else:
-        return jsonify({
-            "status": "unhealthy", 
-            "model_loaded": False,
-            "model_version": "60_dataset"
-        }), 500
+    return jsonify({
+        "status": "healthy" if model else "degraded",
+        "model_loaded": model is not None,
+        "model_version": "60_dataset",
+        "timestamp": pd.Timestamp.now().isoformat()
+    })
 
 @app.route('/tracks', methods=['GET'])
 def get_tracks():
     """Get available track options"""
     try:
+        if not label_encoder_track:
+            return jsonify({"error": "Track encoder not loaded"}), 503
+            
         tracks = label_encoder_track.classes_.tolist()
         track_mapping = {
             track: int(label_encoder_track.transform([track])[0]) 
@@ -110,10 +177,10 @@ def predict():
     try:
         if not model:
             return jsonify({
-                "error": "Model not loaded", 
+                "error": "Model not loaded properly", 
                 "status": "error",
                 "model_version": "60_dataset"
-            }), 500
+            }), 503
 
         # Get JSON data from request
         data = request.get_json()
@@ -125,49 +192,10 @@ def predict():
             }), 400
         
         # Validate input
-        required_fields = [
-            'Track', 'Technical_Correct', 'Soft_Correct', 'Behavioral_Correct',
-            'Career_Correct', 'Digital_Correct', 'Analytical_Correct', 
-            'Creative_Correct', 'Overall_Percentage'
-        ]
-        
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
+        validation_error = validate_input_data(data)
+        if validation_error:
             return jsonify({
-                "error": f"Missing fields: {missing_fields}",
-                "required_fields": required_fields,
-                "status": "error"
-            }), 400
-        
-        # Validate track
-        available_tracks = label_encoder_track.classes_.tolist()
-        if data['Track'] not in available_tracks:
-            return jsonify({
-                "error": f"Invalid track. Available tracks: {available_tracks}",
-                "status": "error"
-            }), 400
-        
-        # Validate numerical ranges
-        numerical_fields = [
-            'Technical_Correct', 'Soft_Correct', 'Behavioral_Correct',
-            'Career_Correct', 'Digital_Correct', 'Analytical_Correct', 
-            'Creative_Correct', 'Overall_Percentage'
-        ]
-        
-        validation_errors = []
-        for field in numerical_fields:
-            value = data[field]
-            if not isinstance(value, (int, float)):
-                validation_errors.append(f"{field} must be a number")
-            elif value < 0:
-                validation_errors.append(f"{field} cannot be negative")
-            elif field == 'Overall_Percentage' and value > 100:
-                validation_errors.append(f"{field} cannot exceed 100")
-        
-        if validation_errors:
-            return jsonify({
-                "error": "Validation errors",
-                "details": validation_errors,
+                "error": validation_error,
                 "status": "error"
             }), 400
         
@@ -186,9 +214,10 @@ def predict():
         
         print(f"📥 Input data: {input_data}")
         
-        # Convert to DataFrame
+        # Convert to DataFrame with correct column order
         input_df = pd.DataFrame([input_data])
-        input_df = input_df[feature_columns]
+        # Ensure correct column order for the model
+        input_df = input_df.reindex(columns=feature_columns, fill_value=0)
         
         print(f"📊 Input DataFrame shape: {input_df.shape}")
         print(f"📊 Input DataFrame columns: {input_df.columns.tolist()}")
@@ -261,18 +290,18 @@ def model_info():
     """Get information about the loaded model"""
     try:
         if not model:
-            return jsonify({"error": "Model not loaded"}), 500
+            return jsonify({"error": "Model not loaded"}), 503
             
         return jsonify({
             "model_type": str(type(model)),
             "model_version": "60_dataset",
             "feature_columns": feature_columns,
-            "label_classes": label_encoder_label.classes_.tolist(),
-            "track_classes": label_encoder_track.classes_.tolist(),
+            "label_classes": label_encoder_label.classes_.tolist() if label_encoder_label else [],
+            "track_classes": label_encoder_track.classes_.tolist() if label_encoder_track else [],
             "model_loaded": True,
-            "performance": loaded_model_info['performance'] if loaded_model_info else None,
-            "ensemble_components": loaded_model_info['components'] if loaded_model_info else None,
-            "ensemble_weights": loaded_model_info['weights'] if loaded_model_info else None,
+            "performance": loaded_model_info.get('performance', {}) if loaded_model_info else {},
+            "ensemble_components": loaded_model_info.get('components', []) if loaded_model_info else [],
+            "ensemble_weights": loaded_model_info.get('weights', []) if loaded_model_info else [],
             "cv_performance": loaded_model_info.get('cv_performance', {}) if loaded_model_info else {}
         })
     except Exception as e:
@@ -283,17 +312,17 @@ def performance():
     """Get model performance metrics"""
     try:
         if not loaded_model_info:
-            return jsonify({"error": "Model info not available"}), 500
+            return jsonify({"error": "Model info not available"}), 503
             
         return jsonify({
             "model_version": "60_dataset",
-            "performance_metrics": loaded_model_info['performance'],
+            "performance_metrics": loaded_model_info.get('performance', {}),
             "cross_validation": loaded_model_info.get('cv_performance', {}),
             "training_timestamp": loaded_model_info.get('timestamp', 'Unknown'),
-            "feature_count": len(feature_columns),
+            "feature_count": len(feature_columns) if feature_columns else 0,
             "ensemble_details": {
-                "components": loaded_model_info['components'],
-                "weights": loaded_model_info['weights']
+                "components": loaded_model_info.get('components', []),
+                "weights": loaded_model_info.get('weights', [])
             }
         })
     except Exception as e:
@@ -304,7 +333,7 @@ def predict_batch():
     """Predict for multiple students at once"""
     try:
         if not model:
-            return jsonify({"error": "Model not loaded"}), 500
+            return jsonify({"error": "Model not loaded"}), 503
 
         data = request.get_json()
         
@@ -319,18 +348,12 @@ def predict_batch():
         
         for i, student_data in enumerate(students):
             try:
-                # Validate required fields for each student
-                required_fields = [
-                    'Track', 'Technical_Correct', 'Soft_Correct', 'Behavioral_Correct',
-                    'Career_Correct', 'Digital_Correct', 'Analytical_Correct', 
-                    'Creative_Correct', 'Overall_Percentage'
-                ]
-                
-                missing_fields = [field for field in required_fields if field not in student_data]
-                if missing_fields:
+                # Validate input for each student
+                validation_error = validate_input_data(student_data)
+                if validation_error:
                     results.append({
                         "student_index": i,
-                        "error": f"Missing fields: {missing_fields}",
+                        "error": validation_error,
                         "status": "error"
                     })
                     continue
@@ -350,7 +373,7 @@ def predict_batch():
                 
                 # Convert to DataFrame and predict
                 input_df = pd.DataFrame([input_data])
-                input_df = input_df[feature_columns]
+                input_df = input_df.reindex(columns=feature_columns, fill_value=0)
                 input_scaled = scaler.transform(input_df)
                 
                 prediction_encoded = model.predict(input_scaled)
@@ -385,6 +408,20 @@ def predict_batch():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/reload-model', methods=['POST'])
+def reload_model():
+    """Reload model artifacts (for development)"""
+    try:
+        load_model_artifacts()
+        return jsonify({
+            "status": "success",
+            "message": "Model reloaded successfully",
+            "model_loaded": model is not None
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    debug_mode = os.environ.get('DEBUG', 'False').lower() == 'true'
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
